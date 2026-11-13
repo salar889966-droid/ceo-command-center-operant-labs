@@ -44,7 +44,7 @@ Ensure you have a running PostgreSQL instance (or create a project on Neon DB). 
    ```bash
    npm run dev
    ```
-   The backend API will typically start on `http://localhost:5000` (or whatever is defined in the `.env` file).
+   The backend API defaults to `http://localhost:8000` (or the `PORT` supplied by the hosting platform). The health endpoints are `/health` (liveness) and `/ready` (database readiness).
 
 ### 4. Frontend Setup
 1. Open a new terminal window and navigate to the frontend directory from the project root:
@@ -77,3 +77,17 @@ The CEO Command Center utilizes n8n workflows for automated processes (such as m
 
 ## Running the Application
 Once the backend, frontend, and n8n workflows are running and configured, you can use the CEO Command Center application normally via your browser. Operations that trigger side effects will successfully route through your backend and invoke the active n8n workflows.
+
+
+## Production hardening notes
+
+- Human API routes require a Bearer access token. The service API key is accepted only on explicit machine-ingestion routes and never impersonates a human administrator.
+- First-time CEO registration requires the `x-ceo-bootstrap-key` header and `CEO_BOOTSTRAP_KEY` environment variable. It succeeds only while the users table is empty. After bootstrap, public registration is closed.
+- Run `npm run db:push` after deploying schema changes. The current schema adds a `role` column with a default of `user`. If the database already contains the CEO account, assign its role once using a controlled database session:
+  ```sql
+  UPDATE users SET role = 'ceo' WHERE email = 'YOUR_CEO_EMAIL';
+  ```
+- The previous service credential appeared in tracked n8n workflow exports. Treat it as compromised and rotate `SERVICE_API_KEY` before enabling imported workflows.
+- Workflow JSON files are templates. Reconnect provider credentials and configure each HTTP Request node with an n8n Header Auth credential; do not store service secrets in workflow JSON.
+- Configure `FRONTEND_URL` as a comma-separated list of exact HTTPS origins in production. Do not use wildcard origins with credentialed cookies.
+- Configure `TRUST_PROXY=true` only when the API is behind a trusted reverse proxy/load balancer.
