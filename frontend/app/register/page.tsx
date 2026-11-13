@@ -12,6 +12,7 @@ import Link from "next/link";
 const registerSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
   password: z.string().min(8, { message: "Password must be at least 8 characters" }),
+  bootstrapKey: z.string().min(32, { message: "Enter the CEO bootstrap key supplied by the system administrator" }),
 });
 
 type RegisterFormValues = z.infer<typeof registerSchema>;
@@ -31,7 +32,10 @@ export default function RegisterPage() {
   const onSubmit = async (data: RegisterFormValues) => {
     setError(null);
     try {
-      const response = await api.post("/auth/register", data);
+      const { bootstrapKey, ...credentials } = data;
+      const response = await api.post("/auth/register", credentials, {
+        headers: { "x-ceo-bootstrap-key": bootstrapKey },
+      });
       login(response.data.accessToken, response.data.user);
     } catch (err: any) {
       setError(err.response?.data?.error || "Failed to register. Please try again.");
@@ -105,6 +109,23 @@ export default function RegisterPage() {
             )}
           </div>
 
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--foreground)]" htmlFor="bootstrapKey">
+              Initial CEO Setup Key
+            </label>
+            <input
+              id="bootstrapKey"
+              type="password"
+              autoComplete="off"
+              {...register("bootstrapKey")}
+              placeholder="One-time setup key"
+              className="w-full bg-[var(--surface)] border border-[var(--border-strong)] rounded-lg py-2.5 px-4 text-[var(--foreground)] placeholder:text-[var(--foreground-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--foreground)] focus:border-transparent transition-all"
+              disabled={isSubmitting}
+            />
+            {errors.bootstrapKey && (
+              <p className="text-xs text-red-500 mt-1">{errors.bootstrapKey.message}</p>
+            )}
+          </div>
           <button
             type="submit"
             disabled={isSubmitting}
