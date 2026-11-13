@@ -325,7 +325,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://snuggle-mushy-oxidize.ngrok-free.dev/api/dashboard/briefing",
+        "url": "https://YOUR_CEO_COMMAND_CENTER_API_DOMAIN/api/dashboard/briefing",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -335,7 +335,7 @@
             },
             {
               "name": "x-api-key",
-              "value": "n8n_secret_operant_key_2026"
+              "value": "CONFIGURE_N8N_HEADER_AUTH_CREDENTIAL"
             }
           ]
         },
