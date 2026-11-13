@@ -80,3 +80,37 @@ No GitHub Actions workflow runs were returned for this repository at audit time.
 ## External dependencies / cannot be completed from source code alone
 
 Live PostgreSQL credentials, Railway service configuration, Billing/CRM/HRMS API contracts and credentials, and n8n instance access/credentials are external dependencies. Code adapters and test fixtures can be prepared without them, but live connectivity and end-to-end verification require those systems to be configured. Do not commit secrets to GitHub or send secrets in chat.
+
+
+## Implementation log — 2026-11-13
+
+Working branch: `feat/ceo-command-center-backend-hardening`
+
+### Completed in this implementation pass
+- Created a dedicated hardening branch; `main` has not been changed.
+- Added this audit and staged delivery plan.
+- Separated human Bearer-token authentication from machine-to-machine `x-api-key` authentication. Service identities are now `role: service`, not admin.
+- Restricted the service credential to explicit ingestion routes: approval creation, briefing ingestion, and meeting ingestion. Human read and approval-decision routes require a user access token.
+- Added constant-time comparison for service credentials.
+- Added startup validation for core secrets and database configuration.
+- Added `/ready` database readiness endpoint and a separate liveness endpoint.
+- Standardized backend default port to 8000 to match the frontend API fallback; documented hosting-platform PORT override.
+- Added an explicit one-time CEO bootstrap key requirement for initial registration; the bootstrap endpoint refuses registration once any user exists.
+- Added a role field to users and included role in issued access tokens and the current-user response.
+- Removed the embedded service-key value and ngrok development URL from the three tracked n8n workflow exports. Added secure import/configuration instructions.
+- Added backend authentication middleware tests and a GitHub Actions CI workflow for backend tests/syntax and frontend build.
+- Updated handoff and environment documentation.
+
+### Verification
+- GitHub Actions backend job has completed successfully for earlier commits on this branch: dependency install, Node tests, and backend JavaScript syntax checks passed.
+- The latest branch CI run is still executing at the time of this log; frontend build completion has not yet been confirmed.
+- No production deployment, live database migration, n8n activation, or external Billing/CRM/HRMS contract test has been performed.
+
+### Remaining before Stage 1 can be called production-ready
+- Review and complete atomic refresh-token rotation and CSRF/session design.
+- Add explicit role/permission middleware to sensitive human routes and an administrative user/invitation lifecycle.
+- Resolve the existing-database CEO role migration safely (existing accounts default to `user`; promote the verified CEO account through a controlled DB operation).
+- Verify the bootstrap flow against an empty test database and ensure concurrent bootstrap attempts cannot create multiple CEO users.
+- Add integration tests for auth, database operations, and service ingestion endpoints.
+- Rotate the previously exposed service key in the live backend and n8n environment before activating workflows.
+- Configure and validate live DATABASE_URL, JWT_SECRET, SERVICE_API_KEY, CEO_BOOTSTRAP_KEY, FRONTEND_URL, and external service credentials in the hosting platform.
