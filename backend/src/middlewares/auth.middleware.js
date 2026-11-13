@@ -38,3 +38,17 @@ export function protectService(req, res, next) {
   req.user = { sub: "service-account", role: "service", authType: "service" };
   return next();
 }
+
+export function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || req.user.authType !== "user") {
+      return res.status(401).json({ error: "Human authentication required" });
+    }
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
+    return next();
+  };
+}
+
+export const requireCEO = requireRole("ceo");
