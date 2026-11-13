@@ -1,6 +1,6 @@
 import { z } from "zod";
 import argon2 from "argon2";
-import { eq, and, desc, gt, count } from "drizzle-orm";
+import { eq, and, gt, count, sql } from "drizzle-orm";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { db } from "../db/db.js";
 import { users, refreshTokens } from "../db/schema.js";
@@ -22,6 +22,17 @@ function matchesSecret(provided, configured) {
   const a = Buffer.from(provided);
   const b = Buffer.from(configured);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+async function issueTokenPairWithExecutor(executor, userId, role, meta = {}) {
+  const accessToken = signAccessToken({ sub: userId, role });
+  const { raw, hash, expiresAt } = generateRefreshToken();
+  const familyId = randomUUID();
+  await executor.insert(refreshTokens).values({
+    userId, tokenHash: hash, familyId, expiresAt,
+    ip: meta.ip, userAgent: meta.userAgent,
+  });
+  return { accessToken, refreshToken: raw };
 }
 
 async function issueTokenPair(userId, role = "user", meta = {}) {
@@ -48,16 +59,23 @@ export async function register(req, res, next) {
       return res.status(403).json({ error: "CEO bootstrap credential is missing or invalid" });
     }
 
-    const [userCount] = await db.select({ value: count() }).from(users);
-    if (Number(userCount.value) > 0) {
-      return res.status(409).json({ error: "CEO bootstrap has already been completed" });
-    }
-
     const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
-    const [user] = await db.insert(users).values({ email, passwordHash, role: "ceo" }).returning();
-    const { accessToken, refreshToken } = await issueTokenPair(user.id, user.role, {
-      ip: req.ip,
-      userAgent: req.get("user-agent"),
+    const { accessToken, refreshToken } = await db.transaction(async (tx) => {
+      // Serialize first-account bootstrap attempts across concurrent requests.
+      await tx.execute(sql`select pg_advisory_xact_lock(714203119)`);
+      const [userCount] = await tx.select({ value: count() }).from(users);
+      if (Number(userCount.value) > 0) {
+        const error = new Error("CEO bootstrap has already been completed");
+        error.status = 409;
+        throw error;
+      }
+
+      const [user] = await tx.insert(users).values({ email, passwordHash, role: "ceo" }).returning();
+      const pair = await issueTokenPairWithExecutor(tx, user.id, user.role, {
+        ip: req.ip,
+        userAgent: req.get("user-agent"),
+      });
+      return pair;
     });
 
     res.cookie(REFRESH_COOKIE_NAME, refreshToken, REFRESH_COOKIE_OPTIONS);
@@ -101,89 +119,48 @@ export async function refresh(req, res, next) {
     if (!raw) return res.status(401).json({ error: "No refresh token" });
 
     const tokenHash = hashToken(raw);
-    let existing = await db.query.refreshTokens.findFirst({
+    const existing = await db.query.refreshTokens.findFirst({
       where: eq(refreshTokens.tokenHash, tokenHash),
     });
-
-    if (!existing) return res.status(401).json({ error: "Invalid refresh token" });
-    if (existing.expiresAt < new Date()) {
-      return res.status(401).json({ error: "Refresh token expired" });
-    }
-
-    if (existing.revoked) {
-      const successor = await db.query.refreshTokens.findFirst({
-        where: and(
-          eq(refreshTokens.familyId, existing.familyId),
-          eq(refreshTokens.revoked, false),
-          gt(refreshTokens.expiresAt, new Date()),
-        ),
-        orderBy: desc(refreshTokens.createdAt),
-      });
-
-      if (!successor) {
-        await db.update(refreshTokens).set({ revoked: true })
-          .where(eq(refreshTokens.familyId, existing.familyId));
-        return res.status(401).json({ error: "Refresh token reuse detected; please log in again" });
-      }
-      existing = successor;
+    if (!existing || existing.expiresAt < new Date() || existing.revoked) {
+      return res.status(401).json({ error: "Invalid, expired, or already-used refresh token" });
     }
 
     const user = await db.query.users.findFirst({ where: eq(users.id, existing.userId) });
     if (!user) return res.status(401).json({ error: "User no longer exists" });
 
-    const accessToken = signAccessToken({ sub: user.id, role: user.role });
-    const { raw: newRaw, hash, expiresAt } = generateRefreshToken();
-
-    const [newToken] = await db.insert(refreshTokens).values({
-      userId: user.id,
-      tokenHash: hash,
-      familyId: existing.familyId,
-      expiresAt,
-      ip: req.ip,
-      userAgent: req.get("user-agent"),
-    }).returning();
-
-    await db.update(refreshTokens)
-      .set({ revoked: true, replacedBy: newToken.id })
-      .where(eq(refreshTokens.id, existing.id));
-
-    res.cookie(REFRESH_COOKIE_NAME, newRaw, REFRESH_COOKIE_OPTIONS);
-    return res.json({ accessToken });
-  } catch (err) {
-    next(err);
-  }
-}
-
-export async function logout(req, res, next) {
-  try {
-    const raw = req.cookies?.[REFRESH_COOKIE_NAME];
-    if (raw) {
-      await db.update(refreshTokens)
+    const { accessToken, refreshToken: newRaw } = await db.transaction(async (tx) => {
+      // Conditional revoke is the concurrency gate: exactly one request can rotate this token.
+      const [claimed] = await tx.update(refreshTokens)
         .set({ revoked: true })
-        .where(eq(refreshTokens.tokenHash, hashToken(raw)));
-    }
+        .where(and(
+          eq(refreshTokens.id, existing.id),
+          eq(refreshTokens.revoked, false),
+          gt(refreshTokens.expiresAt, new Date()),
+        ))
+        .returning({ id: refreshTokens.id });
 
-    res.clearCookie(REFRESH_COOKIE_NAME, {
-      httpOnly: REFRESH_COOKIE_OPTIONS.httpOnly,
-      secure: REFRESH_COOKIE_OPTIONS.secure,
-      sameSite: REFRESH_COOKIE_OPTIONS.sameSite,
-      path: REFRESH_COOKIE_OPTIONS.path,
-    });
-    return res.status(204).send();
-  } catch (err) {
-    next(err);
-  }
-}
+      if (!claimed) {
+        const error = new Error("Refresh token has already been used");
+        error.status = 401;
+        throw error;
+      }
 
-export async function getMe(req, res, next) {
-  try {
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, req.user.sub),
-      columns: { id: true, email: true, role: true, createdAt: true },
+      const access = signAccessToken({ sub: user.id, role: user.role });
+      const { raw: replacement, hash, expiresAt } = generateRefreshToken();
+      const [newToken] = await tx.insert(refreshTokens).values({
+        userId: user.id,
+        tokenHash: hash,
+        familyId: existing.familyId,
+        expiresAt,
+        ip: req.ip,
+        userAgent: req.get("user-agent"),
+      }).returning({ id: refreshTokens.id });
+
+      await tx.update(refreshTokens)
+        .set({ replacedBy: newToken.id })
+        .where(eq(refreshTokens.id, existing.id));
+      return { accessToken: access, refreshToken: replacement };
     });
-    if (!user) return res.status(404).json({ error: "User not found" });
-    return res.json(user);
-  } catch (err) {
-    next(err);
-  }
-}
+
+
